@@ -7,6 +7,7 @@
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickFramebufferObject>
 #include <QtCore/QLoggingCategory>
+#include <QtCore/QProcess>
 #include <memory>
 
 #include "qthelper.hpp"
@@ -80,6 +81,15 @@ signals:
     void sourceChanged();
     void firstFrame();
 
+private slots:
+    void onDownscaleFinished(int exitCode, QProcess::ExitStatus status);
+
+private:
+    void    loadFile(const QString& path);
+    QString resolveVideoSource(const QUrl& source);
+    void    startDownscale(const QString& srcFile, const QUrl& sourceUrl, int tw, int th);
+    void    launchDownscale();
+
 private:
     bool    inited = false;
     QUrl    m_source;
@@ -91,6 +101,20 @@ private:
     mpv_handle*                m_mpv { nullptr };
     std::shared_ptr<MpvHandle> m_shared_mpv { nullptr };
     bool                       m_first_frame { true };
+
+    QProcess* m_downscale { nullptr };
+    QUrl      m_downscaleUrl;
+    QString   m_downscaleSrc;
+    QString   m_downscaleDir;
+    QString   m_downscaleHash;
+    int       m_downscaleWidth { 0 };
+    int       m_downscaleHeight { 0 };
+    int       m_downscaleChoiceIndex { 0 };
+    QString   m_downscaleHwdec;
+    QString   m_srcCodec;
+    QString   m_srcPixFmt;
+    int       m_srcWidth { 0 };
+    int       m_srcHeight { 0 };
 };
 } // namespace mpv
 

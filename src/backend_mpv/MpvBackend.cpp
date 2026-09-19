@@ -11,6 +11,18 @@
 #include <QtQuick/QQuickWindow>
 #include <QtQuick/QQuickOpenGLUtils>
 
+#include <QtCore/QProcess>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QCryptographicHash>
+#include <QtCore/QFileInfo>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonArray>
+#include <QtCore/QDateTime>
+#include <QtCore/QSet>
+#include <QtCore/QVector>
+#include <QtCore/QFile>
+
 #include <clocale>
 #include <memory>
 #include <atomic>
@@ -70,6 +82,223 @@ int CreateMpvContex(mpv_handle* mpv, mpv_render_context** mpv_gl) {
     return code;
 }
 
+} // namespace
+
+namespace
+{
+QString videoCacheDir() {
+    QString base = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+    if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+    return base + "/wescene-renderer/video";
+}
+
+QString cacheHashFor(const QString& src, int w, int h) {
+    const QByteArray key = (src + "|" + QString::number(w) + "x" + QString::number(h)).toUtf8();
+    return QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex());
+}
+
+QString localPathOf(const QUrl& source) {
+    if (source.isLocalFile()) return source.toLocalFile();
+    if (source.scheme().isEmpty()) return source.path();
+    return QString();
+}
+
+struct VideoInfo {
+    int     width { 0 };
+    int     height { 0 };
+    QString codec;
+    QString pixFmt;
+};
+
+bool probeVideoInfo(const QString& file, VideoInfo* out) {
+    const QString ffprobe = QStandardPaths::findExecutable("ffprobe");
+    if (ffprobe.isEmpty()) return false;
+
+    QProcess p;
+    p.start(ffprobe, { "-v", "error", "-select_streams", "v:0", "-show_entries",
+                       "stream=width,height,codec_name,pix_fmt", "-of", "json", file });
+    if (! p.waitForFinished(3000)) {
+        p.kill();
+        p.waitForFinished();
+        return false;
+    }
+    if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0) return false;
+
+    const QJsonArray streams =
+        QJsonDocument::fromJson(p.readAllStandardOutput()).object().value("streams").toArray();
+    if (streams.isEmpty()) return false;
+    const QJsonObject s = streams.first().toObject();
+    out->width  = s.value("width").toInt();
+    out->height = s.value("height").toInt();
+    out->codec  = s.value("codec_name").toString();
+    out->pixFmt = s.value("pix_fmt").toString();
+    return out->width > 0 && out->height > 0;
+}
+
+const QSet<QString>& availableEncoders() {
+    static QSet<QString> cache;
+    static bool          loaded = false;
+    if (loaded) return cache;
+    loaded = true;
+
+    const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+    if (ffmpeg.isEmpty()) return cache;
+
+    QProcess p;
+    p.start(ffmpeg, { "-hide_banner", "-encoders" });
+    if (! p.waitForFinished(4000)) {
+        p.kill();
+        p.waitForFinished();
+        return cache;
+    }
+    const QStringList lines = QString::fromUtf8(p.readAllStandardOutput()).split('\n');
+    for (const QString& line : lines) {
+        const QStringList parts = line.split(' ', Qt::SkipEmptyParts);
+        if (parts.size() >= 2 && parts[0].size() == 6 && parts[0].startsWith('V'))
+            cache.insert(parts[1]);
+    }
+    return cache;
+}
+
+QString drmRenderNode() {
+    const QFileInfoList nodes =
+        QDir("/dev/dri").entryInfoList({ "renderD*" }, QDir::System | QDir::Files, QDir::Name);
+    if (nodes.isEmpty()) return QString();
+    return nodes.first().absoluteFilePath();
+}
+
+enum class HwBackend
+{
+    None,
+    Nvidia,
+    Vaapi,
+    Qsv,
+};
+
+HwBackend backendFromHwdec(const QString& hw) {
+    if (hw.contains("nvdec") || hw.contains("cuda")) return HwBackend::Nvidia;
+    if (hw.contains("vaapi")) return HwBackend::Vaapi;
+    if (hw.contains("qsv")) return HwBackend::Qsv;
+    return HwBackend::None;
+}
+
+HwBackend detectVendorBackend() {
+    const QFileInfoList cards = QDir("/sys/class/drm").entryInfoList(
+        { "card[0-9]*" }, QDir::Dirs | QDir::System, QDir::Name);
+    for (const QFileInfo& card : cards) {
+        QFile f(card.absoluteFilePath() + "/device/vendor");
+        if (! f.open(QIODevice::ReadOnly)) continue;
+        const QString vendor = QString::fromUtf8(f.readAll()).trimmed();
+        if (vendor == "0x10de") return HwBackend::Nvidia;
+        if (vendor == "0x1002" || vendor == "0x1022") return HwBackend::Vaapi;
+        if (vendor == "0x8086") return HwBackend::Qsv;
+    }
+    return HwBackend::None;
+}
+
+struct EncoderChoice {
+    QString     label;
+    QStringList globals;
+    QStringList decoderArgs;
+    QStringList videoArgs;
+    QString     scaleName { "scale" };
+};
+
+QVector<EncoderChoice> buildEncoderChoices(const QString& hwdec, const VideoInfo& info) {
+    const bool hevc = info.codec == "hevc" || info.codec == "h265"
+                   || info.pixFmt.contains("10") || info.pixFmt.contains("12");
+    const QString       vcodec = hevc ? "hevc" : "h264";
+    const QSet<QString>& enc   = availableEncoders();
+
+    HwBackend hw = backendFromHwdec(hwdec);
+    if (hw == HwBackend::None && ! hwdec.contains("no") && ! hwdec.contains("software"))
+        hw = detectVendorBackend();
+
+    QVector<EncoderChoice> list;
+
+    auto appendHw = [&](HwBackend b) {
+        EncoderChoice c;
+        if (b == HwBackend::Nvidia) {
+            const QString name = vcodec + "_nvenc";
+            if (! enc.contains(name)) return;
+            c.label       = name;
+            c.decoderArgs = { "-hwaccel", "cuda", "-hwaccel_output_format", "cuda" };
+            c.videoArgs   = { "-c:v", name, "-preset", "p4", "-tune", "hq", "-b:v", "6M" };
+            c.scaleName   = "scale_cuda";
+        } else if (b == HwBackend::Vaapi) {
+            const QString name = vcodec + "_vaapi";
+            if (! enc.contains(name)) return;
+            const QString node = drmRenderNode();
+            c.label       = name;
+            c.decoderArgs = { "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi" };
+            if (! node.isEmpty()) c.globals = { "-vaapi_device", node };
+            c.videoArgs = { "-c:v", name, "-b:v", "6M" };
+            c.scaleName = "scale_vaapi";
+        } else if (b == HwBackend::Qsv) {
+            const QString name = vcodec + "_qsv";
+            if (! enc.contains(name)) return;
+            c.label       = name;
+            c.globals     = { "-init_hw_device", "qsv=hw" };
+            c.decoderArgs = { "-hwaccel", "qsv", "-hwaccel_output_format", "qsv" };
+            c.videoArgs   = { "-c:v", name, "-global_quality", "23" };
+            c.scaleName   = "scale_qsv";
+        } else {
+            return;
+        }
+        list.append(c);
+    };
+
+    appendHw(hw);
+
+    auto appendSw = [&](const QString& codec) {
+        if (codec == "hevc" && enc.contains("libx265")) {
+            list.append({ "libx265", {}, {},
+                          { "-c:v", "libx265", "-preset", "veryfast", "-crf", "25" }, "scale" });
+        } else if (enc.contains("libx264")) {
+            list.append({ "libx264", {}, {},
+                          { "-c:v", "libx264", "-preset", "veryfast", "-crf", "23" }, "scale" });
+        }
+    };
+    appendSw(vcodec);
+    if (list.isEmpty()) appendSw("h264");
+
+    return list;
+}
+
+void pruneVideoCache() {
+    QDir dir(videoCacheDir());
+    if (! dir.exists()) return;
+
+    const QFileInfoList entries = dir.entryInfoList(QDir::Files);
+    for (const QFileInfo& info : entries) {
+        const QString path = info.absoluteFilePath();
+        const QString base = info.completeBaseName();
+        const QString suffix = info.suffix();
+
+        if (suffix == "part") {
+            if (info.lastModified().secsTo(QDateTime::currentDateTime()) > 6 * 3600)
+                QFile::remove(path);
+            continue;
+        }
+        if (suffix != "json") continue;
+
+        QFile f(path);
+        QByteArray data;
+        if (f.open(QIODevice::ReadOnly)) data = f.readAll();
+        const QString source = QJsonDocument::fromJson(data).object().value("source").toString();
+        const QString video  = info.absolutePath() + "/" + base + ".mp4";
+        if (source.isEmpty() || ! QFileInfo::exists(source)) {
+            QFile::remove(path);
+            QFile::remove(video);
+        }
+    }
+
+    const QFileInfoList leftovers = dir.entryInfoList({ "*.mp4" }, QDir::Files);
+    for (const QFileInfo& info : leftovers) {
+        const QString sidecar = info.absolutePath() + "/" + info.completeBaseName() + ".json";
+        if (! QFileInfo::exists(sidecar)) QFile::remove(info.absoluteFilePath());
+    }
+}
 } // namespace
 
 // ── MpvObject property/command methods ──────────────────────────────────────
@@ -187,15 +416,200 @@ void MpvObject::setSource(const QUrl& source) {
         m_source = source;
         return;
     }
-    bool result = this->command(QVariantList {
-        "loadfile",
-        source.isLocalFile() ? QDir::toNativeSeparators(source.toLocalFile()) : source.url() });
+
+    const QString toLoad = resolveVideoSource(source);
+    const bool    result = this->command(QVariantList { "loadfile", toLoad });
     if (result) {
         m_source = source;
         Q_EMIT sourceChanged();
 
         m_first_frame = false;
     }
+}
+
+void MpvObject::loadFile(const QString& path) {
+    this->command(QVariantList { "loadfile", path });
+}
+
+QString MpvObject::resolveVideoSource(const QUrl& source) {
+    const QString src      = localPathOf(source);
+    const QString fallback = src.isEmpty() ? source.url() : QDir::toNativeSeparators(src);
+    if (src.isEmpty() || ! QFileInfo::exists(src)) return fallback;
+
+    pruneVideoCache();
+
+    const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+    int tw = qRound(width() * dpr) & ~1;
+    int th = qRound(height() * dpr) & ~1;
+    if (tw <= 0 || th <= 0) return fallback;
+
+    VideoInfo info;
+    if (! probeVideoInfo(src, &info)) return fallback;
+    if (info.width <= tw && info.height <= th) return fallback;
+    m_srcCodec   = info.codec;
+    m_srcPixFmt  = info.pixFmt;
+    m_srcWidth   = info.width;
+    m_srcHeight  = info.height;
+
+    const QString hash    = cacheHashFor(src, tw, th);
+    const QString dir     = videoCacheDir();
+    const QString cached  = dir + "/" + hash + ".mp4";
+    const QString sidecar = dir + "/" + hash + ".json";
+    QDir().mkpath(dir);
+
+    if (QFileInfo::exists(cached) && QFileInfo::exists(sidecar)) {
+        QFile f(sidecar);
+        if (f.open(QIODevice::ReadOnly)) {
+            const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+            const QFileInfo   info(src);
+            if (obj.value("source").toString() == src
+                && static_cast<qint64>(obj.value("mtime").toDouble())
+                       == info.lastModified().toSecsSinceEpoch()
+                && static_cast<qint64>(obj.value("size").toDouble()) == info.size()
+                && obj.value("width").toInt() == tw && obj.value("height").toInt() == th) {
+                return cached;
+            }
+        }
+    }
+
+    startDownscale(src, source, tw, th);
+    return fallback;
+}
+
+void MpvObject::startDownscale(const QString& srcFile, const QUrl& sourceUrl, int tw, int th) {
+    const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+    if (ffmpeg.isEmpty()) {
+        _Q_DEBUG() << "ffmpeg not found, skipping video downscale cache";
+        return;
+    }
+
+    if (m_downscale) {
+        if (m_downscale->state() != QProcess::NotRunning) {
+            m_downscale->disconnect(this);
+            m_downscale->kill();
+            m_downscale->waitForFinished(2000);
+        }
+        m_downscale->deleteLater();
+        m_downscale = nullptr;
+    }
+
+    const QString dir = videoCacheDir();
+    QDir().mkpath(dir);
+
+    m_downscale       = new QProcess(this);
+    m_downscaleUrl    = sourceUrl;
+    m_downscaleSrc    = srcFile;
+    m_downscaleDir    = dir;
+    m_downscaleHash   = cacheHashFor(srcFile, tw, th);
+    m_downscaleWidth  = tw;
+    m_downscaleHeight = th;
+
+    QString hwdec = getProperty("hwdec-current").toString();
+    if (hwdec.isEmpty() || hwdec == "auto" || hwdec == "auto-safe") hwdec = m_hwdec;
+    m_downscaleHwdec       = hwdec;
+    m_downscaleChoiceIndex = 0;
+
+    connect(m_downscale, &QProcess::finished, this, &MpvObject::onDownscaleFinished);
+    connect(m_downscale, &QProcess::readyReadStandardError, this, [this]() {
+        _Q_DEBUG() << "ffmpeg stderr:" << m_downscale->readAllStandardError().trimmed();
+    });
+    launchDownscale();
+}
+
+void MpvObject::launchDownscale() {
+    if (! m_downscale) return;
+
+    VideoInfo info;
+    info.codec  = m_srcCodec;
+    info.pixFmt = m_srcPixFmt;
+    const QVector<EncoderChoice> choices = buildEncoderChoices(m_downscaleHwdec, info);
+    if (m_downscaleChoiceIndex >= choices.size()) {
+        _Q_DEBUG() << "no usable encoder for video downscale";
+        m_downscale->deleteLater();
+        m_downscale = nullptr;
+        return;
+    }
+    const EncoderChoice& choice = choices.at(m_downscaleChoiceIndex);
+
+    const QString temp = m_downscaleDir + "/" + m_downscaleHash + ".mp4.part";
+
+    int ow = m_downscaleWidth;
+    int oh = m_downscaleHeight;
+    if (m_srcWidth > 0 && m_srcHeight > 0) {
+        const double ar = double(m_srcWidth) / double(m_srcHeight);
+        if (double(m_downscaleWidth) / double(m_downscaleHeight) > ar)
+            ow = int(m_downscaleHeight * ar + 0.5);
+        else
+            oh = int(m_downscaleWidth / ar + 0.5);
+        ow &= ~1;
+        oh &= ~1;
+        if (ow < 2) ow = 2;
+        if (oh < 2) oh = 2;
+    }
+    const QString vf = QString("%1=w=%2:h=%3").arg(choice.scaleName).arg(ow).arg(oh);
+
+    QStringList args { "-y", "-nostdin", "-loglevel", "error" };
+    args << choice.globals;
+    args << choice.decoderArgs;
+    args << "-i" << m_downscaleSrc;
+    args << "-vf" << vf;
+    if (choice.scaleName == "scale") args << "-pix_fmt" << "yuv420p";
+    args << choice.videoArgs;
+    args << "-c:a" << "aac" << "-b:a" << "128k";
+    args << "-movflags" << "+faststart" << "-f" << "mp4" << temp;
+
+    _Q_DEBUG() << "video downscale using" << choice.label;
+    m_downscale->setProgram(QStandardPaths::findExecutable("ffmpeg"));
+    m_downscale->setArguments(args);
+    m_downscale->start();
+}
+
+void MpvObject::onDownscaleFinished(int exitCode, QProcess::ExitStatus status) {
+    if (! m_downscale) return;
+
+    const QString temp = m_downscaleDir + "/" + m_downscaleHash + ".mp4.part";
+    const bool    ok = status == QProcess::NormalExit && exitCode == 0
+                    && QFileInfo::exists(temp) && QFileInfo(temp).size() > 0;
+
+    if (! ok) {
+        QFile::remove(temp);
+        ++m_downscaleChoiceIndex;
+        _Q_DEBUG() << "downscale encoder failed, trying next candidate" << m_downscaleChoiceIndex;
+        launchDownscale();
+        return;
+    }
+
+    if (ok) {
+        const QString cached  = m_downscaleDir + "/" + m_downscaleHash + ".mp4";
+        const QString sidecar = m_downscaleDir + "/" + m_downscaleHash + ".json";
+
+        QFile::remove(cached);
+        if (QFile::rename(temp, cached)) {
+            const QFileInfo info(m_downscaleSrc);
+            QJsonObject   obj;
+            obj["source"] = m_downscaleSrc;
+            obj["mtime"]  = static_cast<double>(info.lastModified().toSecsSinceEpoch());
+            obj["size"]   = static_cast<double>(info.size());
+            obj["width"]  = m_downscaleWidth;
+            obj["height"] = m_downscaleHeight;
+
+            QFile f(sidecar);
+            if (f.open(QIODevice::WriteOnly))
+                f.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+
+            _Q_DEBUG() << "video downscale cached:" << cached;
+            if (m_source == m_downscaleUrl) {
+                loadFile(cached);
+                m_first_frame = false;
+            }
+        }
+    } else {
+        _Q_DEBUG() << "video downscale failed (exit" << exitCode << ")";
+        QFile::remove(temp);
+    }
+
+    m_downscale->deleteLater();
+    m_downscale = nullptr;
 }
 
 // ── MpvRender (render thread) ───────────────────────────────────────────────
@@ -320,6 +734,8 @@ MpvObject::MpvObject(QQuickItem* parent)
     mpv_set_option_string(m_mpv, "hwdec", m_hwdec.toUtf8().constData());
     mpv_set_option_string(m_mpv, "cuda-decode-device", m_gpuDevice.toUtf8().constData());
     mpv_set_option_string(m_mpv, "loop", "inf");
+    mpv_set_option_string(m_mpv, "hwdec-extra-frames", "1");
+    mpv_set_option_string(m_mpv, "fbo-format", "rgb10");
 
     if (mpv_initialize(m_mpv) < 0) {
         _Q_DEBUG() << "could not initialize mpv context";
@@ -328,7 +744,12 @@ MpvObject::MpvObject(QQuickItem* parent)
     }
 }
 
-MpvObject::~MpvObject() {}
+MpvObject::~MpvObject() {
+    if (m_downscale && m_downscale->state() != QProcess::NotRunning) {
+        m_downscale->kill();
+        m_downscale->waitForFinished(2000);
+    }
+}
 
 void MpvObject::checkAndEmitFirstFrame() {
     if (! m_first_frame) {
