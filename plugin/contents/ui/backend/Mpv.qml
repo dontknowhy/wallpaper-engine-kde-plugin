@@ -59,6 +59,7 @@ Item{
         mute: background.mute
         volume: 0
         hwdec: background.mpvHwdec
+        gpuDevice: background.mpvGpuDevice
         Connections {
             ignoreUnknownSignals: true
             onFirstFrame: {

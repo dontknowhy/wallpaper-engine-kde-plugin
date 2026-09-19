@@ -2,9 +2,10 @@
 #define MPVRENDERER_H_
 
 #include <mpv/client.h>
-#include <mpv/render.h>
+#include <mpv/render_gl.h>
 
-#include <QtQuick/QQuickRhiItem>
+#include <QtQuick/QQuickItem>
+#include <QtQuick/QQuickFramebufferObject>
 #include <QtCore/QLoggingCategory>
 #include <memory>
 
@@ -23,7 +24,7 @@ struct MpvHandle {
 
 class MpvRender;
 
-class MpvObject : public QQuickRhiItem {
+class MpvObject : public QQuickFramebufferObject {
     Q_OBJECT
     Q_PROPERTY(QUrl source READ source WRITE setSource NOTIFY sourceChanged)
     Q_PROPERTY(Status status READ status NOTIFY statusChanged)
@@ -31,13 +32,14 @@ class MpvObject : public QQuickRhiItem {
     Q_PROPERTY(QString logfile READ logfile WRITE setLogfile)
     Q_PROPERTY(int volume READ volume WRITE setVolume)
     Q_PROPERTY(QString hwdec READ hwdec WRITE setHwdec)
+    Q_PROPERTY(QString gpuDevice READ gpuDevice WRITE setGpuDevice)
 
     friend class MpvRender;
 
 public:
     explicit MpvObject(QQuickItem* parent = nullptr);
     virtual ~MpvObject();
-    QQuickRhiItemRenderer* createRenderer() override;
+    Renderer* createRenderer() const override;
 
     enum Status
     {
@@ -58,6 +60,8 @@ public:
     void    setVolume(const int& volume);
     QString hwdec() const;
     void    setHwdec(const QString& hwdec);
+    QString gpuDevice() const;
+    void    setGpuDevice(const QString& device);
 
 public slots:
     void play();
@@ -81,6 +85,7 @@ private:
     QUrl    m_source;
     Status  m_status = Stopped;
     QString m_hwdec { "auto" };
+    QString m_gpuDevice { "auto" };
 
 private:
     mpv_handle*                m_mpv { nullptr };

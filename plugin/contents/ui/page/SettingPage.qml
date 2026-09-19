@@ -29,6 +29,7 @@ Flickable {
     property alias cfg_ShareGpuContext: ckbox_shareGpuContext.checked
     property alias cfg_MirrorScene: ckbox_mirrorScene.checked
     property string cfg_MpvHwdec
+    property string cfg_MpvGpuDevice
     property alias cfg_Speed: spin_speed.dValue
     property alias cfg_MuteAudio: ckbox_muteAudio.checked
     property alias cfg_MouseInput: ckbox_mouseInput.checked
@@ -372,17 +373,72 @@ Flickable {
                 text_color: Kirigami.Theme.textColor
                 icon: '../../images/plugin.svg'
                 visible: cfg_VideoBackend == Common.VideoBackend.Mpv
+                contentBottom: ColumnLayout {
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        color: Kirigami.Theme.disabledTextColor
+                        text: "Methods ending in \"(copy)\" decode on the GPU and copy the "
+                            + "frame back to system memory. The plain methods keep the frame "
+                            + "on the GPU (zero copy), which uses less CPU, but may not be "
+                            + "supported by every driver."
+                    }
+                }
                 actor: ComboBox {
                     id: cbox_mpvHwdec
                     model: [
-                        { text: "Auto",     value: "auto" },
-                        { text: "Software", value: "no"   }
+                        { text: "Auto",             value: "auto" },
+                        { text: "Auto (copy)",      value: "auto-copy" },
+                        { text: "Software",         value: "no" },
+                        { text: "NVDEC",            value: "nvdec" },
+                        { text: "NVDEC (copy)",     value: "nvdec-copy" },
+                        { text: "VAAPI",            value: "vaapi" },
+                        { text: "VAAPI (copy)",     value: "vaapi-copy" },
+                        { text: "Vulkan",           value: "vulkan" },
+                        { text: "Vulkan (copy)",    value: "vulkan-copy" }
                     ]
                     textRole: "text"
                     onActivated: cfg_MpvHwdec = model[currentIndex].value
                     Component.onCompleted: {
                         for (let i = 0; i < model.length; i++) {
                             if (model[i].value === cfg_MpvHwdec) {
+                                currentIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            OptionItem {
+                text: 'Decode GPU'
+                text_color: Kirigami.Theme.textColor
+                icon: '../../images/plugin.svg'
+                visible: cfg_VideoBackend == Common.VideoBackend.Mpv
+                contentBottom: ColumnLayout {
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        color: Kirigami.Theme.disabledTextColor
+                        text: "CUDA device used for NVDEC hardware decoding (maps to mpv's "
+                            + "cuda-decode-device). Auto matches the GPU driving the display, "
+                            + "which is required for zero-copy. Override only if needed."
+                    }
+                }
+                actor: ComboBox {
+                    id: cbox_mpvGpuDevice
+                    model: [
+                        { text: "Auto", value: "auto" },
+                        { text: "0",    value: "0" },
+                        { text: "1",    value: "1" },
+                        { text: "2",    value: "2" },
+                        { text: "3",    value: "3" }
+                    ]
+                    textRole: "text"
+                    onActivated: cfg_MpvGpuDevice = model[currentIndex].value
+                    Component.onCompleted: {
+                        for (let i = 0; i < model.length; i++) {
+                            if (model[i].value === cfg_MpvGpuDevice) {
                                 currentIndex = i;
                                 break;
                             }

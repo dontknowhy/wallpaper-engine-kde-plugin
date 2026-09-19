@@ -1,6 +1,6 @@
 project(mpvbackend)
 
-find_package(Qt${QT_MAJOR_VERSION} COMPONENTS Gui Quick REQUIRED)
+find_package(Qt${QT_MAJOR_VERSION} COMPONENTS Gui Quick OpenGL REQUIRED)
 find_package(Qt${QT_MAJOR_VERSION}GuiPrivate REQUIRED)
 
 find_package(PkgConfig REQUIRED)
@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME}
 	PRIVATE
     Qt::Quick
+	Qt::OpenGL
 	Qt::GuiPrivate
 	${MPV_LIBRARIES}
 )

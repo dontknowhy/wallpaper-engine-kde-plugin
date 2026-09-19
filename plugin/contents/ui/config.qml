@@ -29,6 +29,8 @@ ColumnLayout {
     property alias  cfg_Fps:                 settingPage.cfg_Fps
     property alias  cfg_Volume:              settingPage.cfg_Volume
     property alias  cfg_MpvStats:            settingPage.cfg_MpvStats
+    property alias  cfg_MpvHwdec:            settingPage.cfg_MpvHwdec
+    property alias  cfg_MpvGpuDevice:        settingPage.cfg_MpvGpuDevice
     property alias  cfg_SceneCachePasses:    settingPage.cfg_SceneCachePasses
     property alias  cfg_ShareGpuContext:     settingPage.cfg_ShareGpuContext
     property alias  cfg_MirrorScene:         settingPage.cfg_MirrorScene

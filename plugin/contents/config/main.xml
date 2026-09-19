@@ -94,6 +94,10 @@
       <label>Mpv Hardware Decode</label>
       <default>auto</default>
     </entry>
+    <entry name="MpvGpuDevice" type="String">
+      <label>Mpv Decode GPU</label>
+      <default>auto</default>
+    </entry>
     <entry name="MouseInput" type="Bool">
       <label>Mouse Input</label>
       <default>true</default>

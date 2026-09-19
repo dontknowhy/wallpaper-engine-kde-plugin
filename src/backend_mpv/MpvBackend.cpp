@@ -3,21 +3,74 @@
 #include <QtGlobal>
 #include <QtCore/QObject>
 #include <QtCore/QDir>
+#include <QtGui/QGuiApplication>
+#include <QtGui/qguiapplication_platform.h>
+#include <QtGui/QOpenGLContext>
+#include <QtGui/QOpenGLFunctions>
+#include <QtOpenGL/QOpenGLFramebufferObject>
 #include <QtQuick/QQuickWindow>
-#include <rhi/qrhi.h>
+#include <QtQuick/QQuickOpenGLUtils>
 
+#include <clocale>
 #include <memory>
-#include <vector>
 #include <atomic>
-#include <bit>
-#include <cstdint>
-#include <cstdlib>
 
 Q_LOGGING_CATEGORY(wekdeMpv, "wekde.mpv")
 
 #define _Q_DEBUG() qCDebug(wekdeMpv)
 
 using namespace mpv;
+
+/// some api tips
+/*
+ * Assumes the OpenGL context lives on a certain thread
+ * All mpv_render_* APIs have to be assumed to implicitly use the OpenGL context, if you pass a
+ * mpv_render_context using the OpenGL backend
+ *
+ */
+
+namespace
+{
+void on_mpv_events(void* ctx) { Q_UNUSED(ctx) }
+
+void on_mpv_redraw(void* ctx);
+
+void* get_proc_address_mpv(void* ctx, const char* name) {
+    Q_UNUSED(ctx)
+
+    QOpenGLContext* glctx = QOpenGLContext::currentContext();
+    if (! glctx) return nullptr;
+
+    return reinterpret_cast<void*>(glctx->getProcAddress(QByteArray(name)));
+}
+
+int CreateMpvContex(mpv_handle* mpv, mpv_render_context** mpv_gl) {
+    mpv_opengl_init_params gl_init_params { get_proc_address_mpv, nullptr };
+    mpv_render_param       params[] { { MPV_RENDER_PARAM_API_TYPE,
+                                        const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL) },
+                                      { MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params },
+                                      { MPV_RENDER_PARAM_INVALID, nullptr },
+                                      { MPV_RENDER_PARAM_INVALID, nullptr } };
+
+    // The native display is sometimes required for hardware decode interop.
+    const QString platform = QGuiApplication::platformName();
+    if (platform.contains("xcb")) {
+        if (auto* x11App = qGuiApp->nativeInterface<QNativeInterface::QX11Application>()) {
+            params[2].type = MPV_RENDER_PARAM_X11_DISPLAY;
+            params[2].data = x11App->display();
+        }
+    } else if (platform.contains("wayland")) {
+        if (auto* waylandApp = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>()) {
+            params[2].type = MPV_RENDER_PARAM_WL_DISPLAY;
+            params[2].data = waylandApp->display();
+        }
+    }
+
+    int code = mpv_render_context_create(mpv_gl, mpv, params);
+    return code;
+}
+
+} // namespace
 
 // ── MpvObject property/command methods ──────────────────────────────────────
 
@@ -111,6 +164,15 @@ void MpvObject::setHwdec(const QString& hwdec) {
     mpv_set_property_string(m_mpv, "hwdec", hwdec.toUtf8().constData());
 }
 
+QString MpvObject::gpuDevice() const { return m_gpuDevice; }
+
+void MpvObject::setGpuDevice(const QString& device) {
+    if (m_gpuDevice == device) return;
+    m_gpuDevice = device;
+    // "auto" or an integer index; applies to CUDA/NVDEC decoding.
+    mpv_set_property_string(m_mpv, "cuda-decode-device", device.toUtf8().constData());
+}
+
 void MpvObject::setLogfile(const QString& logfile) { setProperty("log-file", logfile); }
 
 void MpvObject::setSource(const QUrl& source) {
@@ -141,20 +203,18 @@ void MpvObject::setSource(const QUrl& source) {
 namespace mpv
 {
 
-class MpvRender : public QObject, public QQuickRhiItemRenderer {
+class MpvRender : public QObject, public QQuickFramebufferObject::Renderer {
     Q_OBJECT
 public:
-    MpvRender(std::shared_ptr<MpvHandle> mpv): m_shared_mpv(mpv), m_mpv(mpv->handle) {}
+    MpvRender(std::shared_ptr<MpvHandle> mpv, QQuickWindow* win)
+        : m_shared_mpv(mpv), m_mpv(mpv.get()->handle), m_window(win) {}
 
     virtual ~MpvRender() {
         _Q_DEBUG() << "destroyed";
         mpv::qt::command(m_mpv, QVariantList { "stop" });
 
-        if (m_render_ctx) {
-            mpv_render_context_set_update_callback(m_render_ctx, nullptr, nullptr);
-            mpv_render_context_free(m_render_ctx);
-        }
-        m_render_ctx = nullptr;
+        if (m_mpv_context) mpv_render_context_free(m_mpv_context);
+        m_mpv_context = nullptr;
     }
 
     bool Dirty() const { return m_dirty.load(); }
@@ -164,129 +224,87 @@ signals:
     void mpvRedraw();
     void inited();
 
-protected:
-    void initialize(QRhiCommandBuffer* cb) override { Q_UNUSED(cb) }
+public slots:
+    // render thread
+    void renderFrame(QOpenGLFramebufferObject* fbo) {
+        mpv_opengl_fbo mpfbo { .fbo             = static_cast<int>(fbo->handle()),
+                               .w               = fbo->width(),
+                               .h               = fbo->height(),
+                               .internal_format = 0 };
+        int            flip_y { 0 };
 
-    void synchronize(QQuickRhiItem* item) override {
+        mpv_render_param params[] = {
+            { MPV_RENDER_PARAM_OPENGL_FBO, &mpfbo },
+            // Flip rendering (needed due to flipped GL coordinate system).
+            { MPV_RENDER_PARAM_FLIP_Y, &flip_y },
+            { MPV_RENDER_PARAM_INVALID, nullptr }
+        };
+        mpv_render_context_render(m_mpv_context, params);
+    }
+
+    /*
+     * This function is called when a new FBO is needed.
+     * This happens on the initial frame.
+     */
+    QOpenGLFramebufferObject* createFramebufferObject(const QSize& size) override {
+        return QQuickFramebufferObject::Renderer::createFramebufferObject(size);
+    }
+
+    /*
+     * called as a result of QQuickFramebufferObject::update()
+     * called once before the FBO is created
+     * only place when it is safe for the renderer and the item to read and write each others
+     * members
+     */
+    void synchronize(QQuickFramebufferObject* item) override {
         MpvObject* mpv_obj = static_cast<MpvObject*>(item);
 
-        if (! m_render_ctx) {
-            mpv_render_param params[] = { { MPV_RENDER_PARAM_API_TYPE,
-                                            (void*)MPV_RENDER_API_TYPE_SW },
-                                          { MPV_RENDER_PARAM_INVALID, nullptr } };
-            if (mpv_render_context_create(&m_render_ctx, m_mpv, params) >= 0) {
-                mpv_render_context_set_update_callback(m_render_ctx, on_mpv_redraw, this);
+        if (m_mpv_context == nullptr) {
+            if (CreateMpvContex(m_mpv, &m_mpv_context) >= 0) {
+                mpv_render_context_set_update_callback(m_mpv_context, on_mpv_redraw, this);
                 Q_EMIT this->inited();
-            } else {
-                _Q_DEBUG() << "failed to create SW render context";
             }
         }
 
         if (Dirty()) {
             mpv_obj->checkAndEmitFirstFrame();
         }
+        QQuickOpenGLUtils::resetOpenGLState();
     }
 
-    void render(QRhiCommandBuffer* cb) override {
-        QRhiTexture* tex = colorTexture();
-        if (! tex) return;
-
-        QSize texSize = tex->pixelSize();
-        int   w       = texSize.width();
-        int   h       = texSize.height();
-        if (w <= 0 || h <= 0) return;
-
-        // Align stride to 64 bytes for optimal SIMD performance
-        size_t stride  = ((size_t)w * 4 + 63) & ~(size_t)63;
-        size_t bufSize = stride * h;
-
-        bool sizeChanged = (m_bufWidth != w || m_bufHeight != h);
-        if (sizeChanged) {
-            // bufSize must be a multiple of 64 for aligned_alloc
-            size_t alignedBufSize = (bufSize + 63) & ~(size_t)63;
-            m_buffer.resize(alignedBufSize);
-            m_bufWidth  = w;
-            m_bufHeight = h;
-        }
-
-        if (m_render_ctx && (setDirty(false) || sizeChanged)) {
-            int size[] = { w, h };
-
-            mpv_render_param params[] = { { MPV_RENDER_PARAM_SW_SIZE, size },
-                                          { MPV_RENDER_PARAM_SW_FORMAT, (void*)"rgb0" },
-                                          { MPV_RENDER_PARAM_SW_STRIDE, &stride },
-                                          { MPV_RENDER_PARAM_SW_POINTER, m_buffer.data },
-                                          { MPV_RENDER_PARAM_INVALID, nullptr } };
-
-            if (mpv_render_context_render(m_render_ctx, params) < 0) {
-                _Q_DEBUG() << "SW render failed";
-                return;
-            }
-
-            // rgb0 format has alpha=0; set to 255 so the texture is opaque.
-            // 0xFF000000 targets byte +3 (alpha) only on little-endian.
-            static_assert(std::endian::native == std::endian::little,
-                          "Alpha fix assumes little-endian byte order");
-            for (int y = 0; y < h; y++) {
-                uint32_t* row = reinterpret_cast<uint32_t*>(m_buffer.data + y * stride);
-                for (int x = 0; x < w; x++) {
-                    row[x] |= 0xFF000000u;
-                }
-            }
-
-            // Upload frame to colorTexture
-            QByteArray data = QByteArray::fromRawData(reinterpret_cast<const char*>(m_buffer.data),
-                                                      static_cast<qsizetype>(bufSize));
-
-            QRhiTextureSubresourceUploadDescription desc(data);
-            desc.setDataStride((quint32)stride);
-
-            QRhiResourceUpdateBatch* batch = rhi()->nextResourceUpdateBatch();
-            batch->uploadTexture(
-                tex, QRhiTextureUploadDescription({ QRhiTextureUploadEntry(0, 0, desc) }));
-            cb->resourceUpdate(batch);
+    void render() override {
+        if (setDirty(false)) {
+            QOpenGLFramebufferObject* fbo = framebufferObject();
+            renderFrame(fbo);
+            QQuickOpenGLUtils::resetOpenGLState();
         }
     }
 
 private:
-    static void on_mpv_redraw(void* ctx) {
-        auto* render = static_cast<MpvRender*>(ctx);
-        render->setDirty(true);
-        Q_EMIT render->mpvRedraw();
-    }
+    mpv_render_context* m_mpv_context { nullptr };
+    mpv_handle*         m_mpv { nullptr };
+    QQuickWindow*       m_window { nullptr };
 
-    mpv_handle*                m_mpv { nullptr };
-    mpv_render_context*        m_render_ctx { nullptr };
-    std::shared_ptr<MpvHandle> m_shared_mpv;
+    std::shared_ptr<MpvHandle> m_shared_mpv { nullptr };
 
-    struct AlignedBuffer {
-        uint8_t* data { nullptr };
-        size_t   size { 0 };
-        void     resize(size_t newSize) {
-            if (size == newSize) return;
-            std::free(data);
-            data = static_cast<uint8_t*>(std::aligned_alloc(64, newSize));
-            size = data ? newSize : 0;
-            if (data) std::memset(data, 0, size);
-        }
-        ~AlignedBuffer() { std::free(data); }
-        AlignedBuffer()                                = default;
-        AlignedBuffer(const AlignedBuffer&)            = delete;
-        AlignedBuffer& operator=(const AlignedBuffer&) = delete;
-    };
-
-    AlignedBuffer     m_buffer;
-    int               m_bufWidth { 0 };
-    int               m_bufHeight { 0 };
     std::atomic<bool> m_dirty { false };
 };
 
 } // namespace mpv
 
+namespace
+{
+void on_mpv_redraw(void* ctx) {
+    auto* mpv = static_cast<mpv::MpvRender*>(ctx);
+    mpv->setDirty(true);
+    Q_EMIT mpv->mpvRedraw();
+}
+} // namespace
+
 // ── MpvObject construction and renderer creation ────────────────────────────
 
 MpvObject::MpvObject(QQuickItem* parent)
-    : QQuickRhiItem(parent), m_shared_mpv(std::make_shared<MpvHandle>(mpv_create())) {
+    : QQuickFramebufferObject(parent), m_shared_mpv(std::make_shared<MpvHandle>(mpv_create())) {
     m_mpv = m_shared_mpv->handle;
 
     if (! m_mpv) {
@@ -300,7 +318,7 @@ MpvObject::MpvObject(QQuickItem* parent)
     mpv_set_option_string(m_mpv, "config", "no");
     mpv_set_option_string(m_mpv, "vo", "libmpv");
     mpv_set_option_string(m_mpv, "hwdec", m_hwdec.toUtf8().constData());
-    mpv_set_option_string(m_mpv, "vf", "vflip");
+    mpv_set_option_string(m_mpv, "cuda-decode-device", m_gpuDevice.toUtf8().constData());
     mpv_set_option_string(m_mpv, "loop", "inf");
 
     if (mpv_initialize(m_mpv) < 0) {
@@ -319,11 +337,12 @@ void MpvObject::checkAndEmitFirstFrame() {
     }
 }
 
-QQuickRhiItemRenderer* MpvObject::createRenderer() {
+QQuickFramebufferObject::Renderer* MpvObject::createRenderer() const {
     window()->setPersistentSceneGraph(true);
 
-    auto* render = new MpvRender(m_shared_mpv);
+    auto* render = new MpvRender(m_shared_mpv, window());
 
+    // Use Queued signal to update at gui thread
     connect(render, &MpvRender::mpvRedraw, this, &MpvObject::update, Qt::QueuedConnection);
     connect(render, &MpvRender::inited, this, &MpvObject::initCallback, Qt::QueuedConnection);
     return render;
