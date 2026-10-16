@@ -10,7 +10,19 @@ Rectangle {
     anchors.fill: parent
     color: wallpaper.configuration.BackgroundColor
     
-    property string steamlibrary: Qt.resolvedUrl(wallpaper.configuration.SteamLibraryPath).toString()
+    // Steam libraries found on this machine, see FileHelper::detectSteam
+    property var steamDetect: pyext.detect_steam(wallpaper.configuration.SteamLibraryPath)
+    property string steamlibrary: {
+        // Qt.resolvedUrl('') gives this file's own url, so fall back on the
+        // native path and resolve only once there is one.
+        const path = wallpaper.configuration.SteamLibraryPath || steamDetect.library;
+        return path ? Qt.resolvedUrl(path).toString() : '';
+    }
+    // SceneBackend reads assets as a QUrl and QUrl::toLocalFile() is empty for
+    // a scheme-less one, so the detected native path has to be resolved too.
+    property string steamAssets: steamDetect.assets
+        ? Qt.resolvedUrl(steamDetect.assets).toString()
+        : Common.getAssetsPath(steamlibrary)
     // Global Mode: shared config (wallpaper choice + randomization) lives in
     // ~/.config/wekde/global.json instead of per-screen KConfig. globalRev is
     // bumped on every global change to re-evaluate the resolver bindings below.
@@ -144,10 +156,19 @@ Rectangle {
             wallpaper.accentColorChanged();
     }
 
+    // QtObject.destroy() deletes at the end of the event loop. Clear the target
+    // before destroy(), then drop the property, or the grabber keeps forwarding.
+    // Turning mouse input off also recenters. Teardown uses this drop and does not.
+    function dropMouseHook() {
+        if(!mouseHooker)
+            return;
+        mouseHooker.target = null;
+        mouseHooker.destroy();
+        mouseHooker = null;
+    }
+
     Component.onDestruction: {
-        if(mouseHooker) {
-            mouseHooker.destroy();
-        }
+        dropMouseHook();
     }
 
     function applySource() {
@@ -175,11 +196,12 @@ Rectangle {
     onMouseInputChanged: {
         if(this.mouseInput) {
             hookTimer.start();
-        }
-        else if(this.mouseHooker) {
-            this.mouseHooker.target = null;
-            this.mouseHooker.destroy;
-            this.mouseHooker = null;
+        } else {
+            dropMouseHook();
+            // The scene keeps the last pointer. Centre it so camera parallax
+            // eases back instead of staying at the offset where input was cut.
+            if(backendLoader.item && backendLoader.item.resetPointer)
+                backendLoader.item.resetPointer();
         }
     }
 
@@ -216,7 +238,7 @@ Rectangle {
             if(screenGrid === null)
                 return false;
             console.error(screenGrid);
-            if(background.mouseHooker) background.mouseHooker.destroy();
+            dropMouseHook();
             background.mouseHooker = Qt.createQmlObject(`import QtQuick 2.12;
                     import com.github.catsout.wallpaperEngineKde 1.2
                     MouseGrabber {
@@ -251,8 +273,13 @@ Rectangle {
     WallpaperListModel {
         id: wpListModel
         enabled: background.randomizeWallpaper
-        workshopDirs: Common.getProjectDirs(background.steamlibrary)
-        globalConfigPath: Common.getGlobalConfigPath(background.steamlibrary)
+        // Detection already resolved and deduplicated every library; the
+        // string-built dirs are the fallback for a tree it does not know.
+        workshopDirs: background.steamDetect.projectDirs.length
+            ? background.steamDetect.projectDirs
+            : Common.getProjectDirs(background.steamlibrary)
+        globalConfigPath: background.steamDetect.globalConfig
+            || Common.getGlobalConfigPath(background.steamlibrary)
         filterStr: background.filterStr
         initItemOp: (item) => {
             if(!background.customConf) return;
@@ -414,7 +441,7 @@ Rectangle {
             case 'scene':
                 if(background.hasLib) {
                     qmlsource = "backend/Scene.qml";
-                    properties = {"assets": Common.getAssetsPath(steamlibrary)};
+                    properties = {"assets": background.steamAssets};
                 } else {
                     backendLoader.loadInfoShow("Plugin lib not found. To support scene, please compile and install it.");
                     return; 

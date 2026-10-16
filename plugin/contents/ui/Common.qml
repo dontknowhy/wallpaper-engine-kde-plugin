@@ -29,7 +29,7 @@ QtObject {
 
     readonly property string version: '0.6.0'
 
-    readonly property string repo_url: 'https://github.com/catsout/wallpaper-engine-kde-plugin'
+    readonly property string repo_url: 'https://github.com/RainyPixel/wallpaper-engine-kde-plugin'
 
     readonly property var wpitem_template: ({
         workshopid: "",
@@ -290,10 +290,6 @@ QtObject {
 
     function checklib_folderlist(parentItem) {
         return checklib('Qt.labs.folderlistmodel 2.11', parentItem)
-    }
-
-    function checklib_websockets(parentItem) {
-        return checklib('QtWebSockets', parentItem)
     }
 
     function checklib_webchannel(parentItem) {

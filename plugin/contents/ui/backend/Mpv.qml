@@ -60,6 +60,7 @@ Item{
         volume: 0
         hwdec: background.mpvHwdec
         gpuDevice: background.mpvGpuDevice
+        maxFps: background.fps
         Connections {
             ignoreUnknownSignals: true
             onFirstFrame: {

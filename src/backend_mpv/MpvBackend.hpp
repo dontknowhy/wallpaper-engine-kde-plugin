@@ -34,6 +34,7 @@ class MpvObject : public QQuickFramebufferObject {
     Q_PROPERTY(int volume READ volume WRITE setVolume)
     Q_PROPERTY(QString hwdec READ hwdec WRITE setHwdec)
     Q_PROPERTY(QString gpuDevice READ gpuDevice WRITE setGpuDevice)
+    Q_PROPERTY(int maxFps READ maxFps WRITE setMaxFps NOTIFY maxFpsChanged)
 
     friend class MpvRender;
 
@@ -63,6 +64,8 @@ public:
     void    setHwdec(const QString& hwdec);
     QString gpuDevice() const;
     void    setGpuDevice(const QString& device);
+    int     maxFps() const;
+    void    setMaxFps(int fps);
 
 public slots:
     void play();
@@ -80,6 +83,7 @@ signals:
     void statusChanged();
     void sourceChanged();
     void firstFrame();
+    void maxFpsChanged();
 
 private slots:
     void onDownscaleFinished(int exitCode, QProcess::ExitStatus status);
@@ -91,11 +95,14 @@ private:
     void    launchDownscale();
 
 private:
+    void applyFpsLimit();
+
     bool    inited = false;
     QUrl    m_source;
     Status  m_status = Stopped;
     QString m_hwdec { "auto" };
     QString m_gpuDevice { "auto" };
+    int     m_maxFps { 0 };
 
 private:
     mpv_handle*                m_mpv { nullptr };
