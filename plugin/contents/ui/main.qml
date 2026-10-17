@@ -139,6 +139,12 @@ Rectangle {
         }
     }
 
+    // Build-time capabilities of the plugin library (e.g. which scene backend
+    // is compiled in).
+    PluginInfo {
+        id: pluginInfo
+    }
+
     property string nowBackend: ""
 
     property var mouseHooker
@@ -440,7 +446,10 @@ Rectangle {
                 break;
             case 'scene':
                 if(background.hasLib) {
-                    qmlsource = "backend/Scene.qml";
+                    // hasLweScene is a build-time capability of the plugin lib:
+                    // linux-wallpaperengine is the default scene renderer, the
+                    // old backend_scene stays available for USE_LWE_SCENE=OFF.
+                    qmlsource = pluginInfo.hasLweScene ? "backend/LweScene.qml" : "backend/Scene.qml";
                     properties = {"assets": background.steamAssets};
                 } else {
                     backendLoader.loadInfoShow("Plugin lib not found. To support scene, please compile and install it.");

@@ -10,6 +10,9 @@
 #include "GamemodeMonitor.hpp"
 #include "WallpaperSyncBus.hpp"
 #include "GlobalConfigStore.hpp"
+#ifdef WEKDE_HAVE_LWE_SCENE
+#include "LweSceneBackend.hpp"
+#endif
 
 constexpr std::array<uint, 2> WPVer { 1, 2 };
 
@@ -23,6 +26,9 @@ public:
         qmlRegisterType<wekde::PluginInfo>(uri, WPVer[0], WPVer[1], "PluginInfo");
         qmlRegisterType<wekde::MouseGrabber>(uri, WPVer[0], WPVer[1], "MouseGrabber");
         qmlRegisterType<scenebackend::SceneObject>(uri, WPVer[0], WPVer[1], "SceneViewer");
+#ifdef WEKDE_HAVE_LWE_SCENE
+        qmlRegisterType<lwebackend::LweSceneViewer>(uri, WPVer[0], WPVer[1], "LweSceneViewer");
+#endif
         std::setlocale(LC_NUMERIC, "C");
         qmlRegisterType<mpv::MpvObject>(uri, WPVer[0], WPVer[1], "Mpv");
         qmlRegisterType<wekde::TTYSwitchMonitor>(uri, WPVer[0], WPVer[1], "TTYSwitchMonitor");
