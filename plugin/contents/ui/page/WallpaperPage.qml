@@ -575,16 +575,26 @@ RowLayout {
                     }
                     function save_changes() {
                         console.log("save_changes called, config_changes:", JSON.stringify(config_changes));
-                        config_resets.forEach((wid) => {
+                        const resets = Array.from(config_resets);
+                        const changes = config_changes;
+                        resets.forEach((wid) => {
                             pyext.reset_wallpaper_config(wid).then(res => {});
                         });
-                        Object.entries(config_changes).forEach(([wid, cfg]) => {
+                        Object.entries(changes).forEach(([wid, cfg]) => {
                             console.log("saving config for wid:", wid, "cfg:", JSON.stringify(cfg));
                             pyext.write_wallpaper_config(wid, cfg);
                         });
                         // Clear after saving
                         config_changes = {};
                         config_resets.clear();
+                        // set_config() bumps PerOptChanged while the new value only lives in
+                        // config_changes, so the running wallpaper reads the *old* config back at
+                        // that moment. Nudge it again now that the file on disk holds the new
+                        // values, or the just-saved options (speed, display mode, volume, ...) stay
+                        // invisible until the wallpaper happens to be reloaded.
+                        if (resets.length > 0 || Object.keys(changes).length > 0) {
+                            cfg_PerOptChanged++;
+                        }
                     }
                     function set_config(key, val) {
                         console.log("set_config called, key:", key, "val:", val, "workshopid:", workshopid);
