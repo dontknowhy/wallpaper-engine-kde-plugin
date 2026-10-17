@@ -1,0 +1,78 @@
+diff --git a/src/core/WallpaperEngine/Scripting/ScriptableObject.cpp b/src/core/WallpaperEngine/Scripting/ScriptableObject.cpp
+index 9d5163a..3050460 100644
+--- a/src/core/WallpaperEngine/Scripting/ScriptableObject.cpp
++++ b/src/core/WallpaperEngine/Scripting/ScriptableObject.cpp
+@@ -14,6 +14,59 @@ ScriptableObject::ScriptableObject (Wallpapers::CScene& scene, const Object& obj
+     this->registerProperty ("scale", *object.groupScale->value);
+     this->registerProperty ("angles", *object.groupAngles->value);
+     this->registerProperty ("visible", *object.groupVisible->value);
++
++    // Shader constants can carry scripts too (e.g. material values driven by engine.timeOfDay).
++    // Their scripts have to be queued here as well, otherwise the value stays at whatever the JSON
++    // declared and effects that rely on them render with stale values.
++    // NOTE (wallpaper-engine-kde-plugin local patch): upstream only queues the properties above.
++    if (!object.is<Image> ()) {
++	return;
++    }
++
++    const auto* image = object.as<Image> ();
++
++    // constants declared by the material's passes
++    if (image->model != nullptr && image->model->material != nullptr) {
++	int index = 0;
++
++	for (const auto& pass : image->model->material->passes) {
++	    if (pass != nullptr) {
++		for (const auto& [name, setting] : pass->constants) {
++		    this->registerConstantValue ("material" + std::to_string (index) + "_" + name, setting);
++		}
++	    }
++
++	    ++index;
++	}
++    }
++
++    // constants declared by the object's effect pass overrides
++    for (const auto& effect : image->effects) {
++	if (effect == nullptr) {
++	    continue;
++	}
++
++	for (const auto& pass : effect->passOverrides) {
++	    if (pass == nullptr) {
++		continue;
++	    }
++
++	    for (const auto& [name, setting] : pass->constants) {
++		this->registerConstantValue (
++		    "effect" + std::to_string (effect->id) + "_pass" + std::to_string (pass->id) + "_" + name, setting
++		);
++	    }
++	}
++    }
++}
++
++void ScriptableObject::registerConstantValue (const std::string& name, const UserSettingUniquePtr& setting) {
++    // only values with a script need to be queued, plain values never change
++    if (setting == nullptr || setting->value == nullptr || !setting->value->getScriptSource ().has_value ()) {
++	return;
++    }
++
++    this->registerProperty (name, *setting->value);
+ }
+ 
+ DynamicValue& ScriptableObject::getProperty (const std::string& name) {
+diff --git a/src/core/WallpaperEngine/Scripting/ScriptableObject.h b/src/core/WallpaperEngine/Scripting/ScriptableObject.h
+index dffe11b..b43f327 100644
+--- a/src/core/WallpaperEngine/Scripting/ScriptableObject.h
++++ b/src/core/WallpaperEngine/Scripting/ScriptableObject.h
+@@ -25,6 +25,8 @@ protected:
+     void registerProperty (const std::string& name, DynamicValue& value);
+ 
+ private:
++    void registerConstantValue (const std::string& name, const UserSettingUniquePtr& setting);
++
+     std::map<std::string, PropertyEntry> m_properties;
+ };
+ }
+\ No newline at end of file

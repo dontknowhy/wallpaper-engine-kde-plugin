@@ -2,6 +2,12 @@ find_package(Qt6 REQUIRED COMPONENTS Quick Qml Core DBus)
 
 add_subdirectory(backend_mpv)
 
+option(USE_LWE_SCENE
+       "Render scene wallpapers with the linux-wallpaperengine backend" ON)
+if(USE_LWE_SCENE)
+  add_subdirectory(backend_lwe)
+endif()
+
 SET(BUILD_QML ON CACHE BOOL "")
 add_subdirectory(backend_scene)
 
@@ -32,6 +38,19 @@ target_link_libraries(${PROJECT_NAME}
 	Qt::Core
 	Qt::DBus
 )
+
+if(USE_LWE_SCENE)
+  target_link_libraries(${PROJECT_NAME} PRIVATE lwebackend)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE WEKDE_HAVE_LWE_SCENE)
+  # liblinux-wallpaperengine-core.so is produced inside the build tree by the
+  # ExternalProject (lwe-install/), so the build tree binary finds it there.
+  # The install rule in src/backend_lwe/ puts it into the system library
+  # directory; the installed binary must look there instead, otherwise it would
+  # depend on a build directory that no longer exists.
+  set_target_properties(${PROJECT_NAME} PROPERTIES
+    BUILD_RPATH "${CMAKE_BINARY_DIR}/lwe-install/lib"
+    INSTALL_RPATH "${KDE_INSTALL_FULL_LIBDIR}")
+endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_VISIBILITY_PRESET hidden)
 set_target_properties(${PROJECT_NAME}
                        PROPERTIES LINK_FLAGS "-Wl,--exclude-libs,ALL")

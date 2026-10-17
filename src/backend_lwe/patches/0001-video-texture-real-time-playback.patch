@@ -1,0 +1,17 @@
+diff --git a/src/core/WallpaperEngine/Render/CTexture.cpp b/src/core/WallpaperEngine/Render/CTexture.cpp
+index 475c482..e59a10c 100644
+--- a/src/core/WallpaperEngine/Render/CTexture.cpp
++++ b/src/core/WallpaperEngine/Render/CTexture.cpp
+@@ -37,7 +37,11 @@ CTexture::CTexture (RenderContext& context, TextureUniquePtr header) :
+ 	// setup texture video player
+ 	this->m_player->setMuted ();
+ 	this->m_player->setVolume (0.0f);
+-	this->m_player->setUntimed ();
++	// NOTE (wallpaper-engine-kde-plugin local patch): mpv's untimed mode makes
++	// the video advance exactly one frame per rendered frame, so the playback
++	// rate becomes render_fps / video_fps (2x too fast for a 30fps video when
++	// the wallpaper is rendered at 60fps, 0.5x at 15fps). Video wallpapers
++	// (CVideo) never enable it; video textures should follow mpv's clock too.
+ 	// texture is ready, nothing else to do
+ 	return;
+     }

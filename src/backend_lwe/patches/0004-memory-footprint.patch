@@ -1,0 +1,36 @@
+diff --git a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+--- a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -224,6 +224,16 @@
+     mpv_set_option_string (this->m_handle, "fbo-format", "rgba8");
+     mpv_set_option_string (this->m_handle, "vo", "libmpv");
+     mpv_set_option_string (this->m_handle, "profile", "fast");
++    // NOTE (wallpaper-engine-kde-plugin local patch): scene video textures are
++    // served from an in-memory stream, where mpv's demuxer cache
++    // (demuxer-max-bytes 150MiB + demuxer-max-back-bytes 50MiB by default) is
++    // nothing but a second copy of data we already hold in RAM.
++    if (this->m_stream.has_value ()) {
++	mpv_set_option_string (this->m_handle, "cache", "no");
++	// scene video textures are always muted (CTexture sets mute/volume 0), so
++	// there is no reason to create an audio output for them at all
++	mpv_set_option_string (this->m_handle, "aid", "no");
++    }
+     mpv_set_option_string (this->m_handle, "untimed", this->m_untimed ? "yes" : "no");
+ 
+     if (mpv_initialize (this->m_handle) < 0) {
+diff --git a/src/core/WallpaperEngine/Render/CTexture.cpp b/src/core/WallpaperEngine/Render/CTexture.cpp
+--- a/src/core/WallpaperEngine/Render/CTexture.cpp
++++ b/src/core/WallpaperEngine/Render/CTexture.cpp
+@@ -34,6 +34,12 @@
+ 	    std::make_unique<MemoryStreamProtocol> (mipmap->uncompressedData.get (), mipmap->uncompressedSize),
+ 	    this->m_header->textureWidth, this->m_header->textureHeight
+ 	);
++	// NOTE (wallpaper-engine-kde-plugin local patch): MemoryStreamProtocol owns
++	// its own copy of the video, so the header's copy is dead weight from here
++	// on (video textures never go through the stb_image upload path below).
++	// Dropping it halves the RAM a scene video texture costs.
++	mipmap->uncompressedData.reset ();
++	mipmap->uncompressedSize = 0;
+ 	// setup texture video player
+ 	this->m_player->setMuted ();
+ 	this->m_player->setVolume (0.0f);
