@@ -13,3 +13,6 @@
 [submodule "src/backend_scene/third_party/nlohmann"]
 	path = src/backend_scene/third_party/nlohmann
 	url = https://github.com/nlohmann/json.git
+[submodule "third_party/linux-wallpaperengine"]
+	path = third_party/linux-wallpaperengine
+	url = https://github.com/Almamu/linux-wallpaperengine
