@@ -68,15 +68,30 @@ build re-applies the series.
 ## Frame timing diagnostic
 
 Setting `WEKDE_LWE_TIMING=1` in the environment makes every 30th rendered frame
-log its full cost (engine render, video textures and blit, GPU included):
+log where its time goes: the engine render (including the mpv video textures),
+the blit into Qt's target, and the `glFinish()` that waits for the GPU.
 
 ```
 WEKDE_LWE_TIMING=1 plasmashell
-# wekde.lwe: frame cost: avg 3.98 ms, worst 8.36 ms, 30.2 render/s
+# wekde.lwe: frame cost: avg 16.36 ms, worst 16.93 ms, 60 render/s | engine 1.20 ms, blit 0.03 ms, glFinish 15.14 ms
 ```
 
 Measured on a Quadro P620 with scene `2843295581` (2560x1440, one 2560x1440@60fps
-video texture): ~3-4 ms per frame regardless of the configured FPS.
+video texture) at a 1920x1080 desktop:
+
+| configured `Fps` | engine | blit | glFinish | avg |
+| --- | --- | --- | --- | --- |
+| 30 | 0.8-1.1 ms | 0.03 ms | 2.2-2.7 ms | ~3.4-3.8 ms |
+| 60 | 1.2-1.3 ms | 0.03 ms | ~15.1 ms | ~16.4 ms |
+
+The wallpaper's own work is ~1.3 ms of CPU per frame at 60 fps, independent of
+the desktop resolution; at `Fps` equal to the screen refresh rate the `glFinish`
+call additionally waits for the display, which is why the averaged "frame cost"
+sits at exactly one frame interval. The number therefore does *not* say that
+the wallpaper saturates the compositor's main thread — the `glFinish` wait is
+where the render thread sits idle — but it does mean the wallpaper keeps the
+GPU busy: `nvidia-smi` showed ~26 % GPU utilisation for this scene at 60 fps,
+which is what a dialog opened on top of it has to share.
 
 
 ## Build and install

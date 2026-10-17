@@ -620,11 +620,14 @@ void LweSceneRenderer::render() {
     ensureBlitProgram();
 
     // Optional frame timing diagnostic: with WEKDE_LWE_TIMING=1 in the
-    // environment every 30th frame logs its full cost (engine render, mpv video
-    // textures and the blit, GPU work included). Used to check how much of the
+    // environment every 30th frame logs how long the render takes (engine render
+    // including the mpv video textures, the blit into Qt's target, and the
+    // glFinish that waits for the GPU). Used to check how much of the
     // compositor's frame budget a wallpaper actually takes.
     static const bool timingEnabled = qEnvironmentVariableIsSet("WEKDE_LWE_TIMING");
     QElapsedTimer frameClock;
+    static double engineSumMs = 0.0;
+    static double blitSumMs = 0.0;
 
     if (timingEnabled) {
         frameClock.start();
@@ -671,6 +674,9 @@ void LweSceneRenderer::render() {
 
     wp_render_update_time(m_context);
     wp_render_frame(m_project);
+    if (timingEnabled) {
+        engineSumMs += frameClock.nsecsElapsed() / 1e6;
+    }
 
     // The first render creates the wallpaper, and its viewport size is only
     // known from that point on. Until then the engine draws into a 1x1 target.
@@ -698,6 +704,9 @@ void LweSceneRenderer::render() {
             m_gl->glClear(GL_COLOR_BUFFER_BIT);
             m_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
         }
+    }
+    if (timingEnabled) {
+        blitSumMs += frameClock.nsecsElapsed() / 1e6;
     }
 
     if (m_firstFramePending.exchange(false)) {
@@ -732,11 +741,17 @@ void LweSceneRenderer::render() {
         worst = std::max(worst, ms);
         ++frames;
         if (frames >= 30) {
-            _LWE_DEBUG() << "frame cost: avg" << (total / frames) << "ms, worst" << worst << "ms,"
-                         << (1000.0 * frames / sampleWindow.elapsed()) << "render/s";
+            const double avg = total / frames;
+            const double blit = blitSumMs / frames;
+            _LWE_DEBUG() << "frame cost: avg" << avg << "ms, worst" << worst << "ms,"
+                         << (1000.0 * frames / sampleWindow.elapsed()) << "render/s"
+                         << "| engine" << (engineSumMs / frames) << "ms, blit" << (blit - engineSumMs / frames)
+                         << "ms, glFinish" << (avg - blit) << "ms";
             total = 0.0;
             worst = 0.0;
             frames = 0;
+            engineSumMs = 0.0;
+            blitSumMs = 0.0;
             sampleWindow.restart();
         }
     }
