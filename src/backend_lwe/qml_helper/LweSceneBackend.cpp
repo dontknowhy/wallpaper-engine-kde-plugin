@@ -80,6 +80,34 @@ QString toLocalPath(const QString& value) {
     return url.isLocalFile() ? url.toLocalFile() : value;
 }
 
+// userProperties arrives as a JSON object of property name -> value.
+QJsonObject parseUserProperties(const QString& json) {
+    if (json.isEmpty()) {
+        return {};
+    }
+
+    QJsonParseError error {};
+    const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+        return {};
+    }
+
+    return document.object();
+}
+
+QString userPropertyValueToString(const QJsonValue& value) {
+    switch (value.type()) {
+        case QJsonValue::Bool:
+            return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+        case QJsonValue::Double:
+            return QString::number(value.toDouble());
+        case QJsonValue::String:
+            return value.toString();
+        default:
+            return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    }
+}
+
 } // namespace
 
 class LweSceneRenderer : public QQuickFramebufferObject::Renderer {
@@ -104,6 +132,7 @@ private:
     bool ensureSceneFbo(int width, int height);
     void restart();
     void teardown();
+    bool applyUserProperties();
     void blitTo(int targetFbo, const QSize& targetSize);
 
     QPointer<LweSceneViewer> m_item;
@@ -256,6 +285,13 @@ void LweSceneRenderer::synchronize(QQuickFramebufferObject* item) {
 
     m_fillMode = viewer->m_fillMode;
     m_speed = viewer->m_speed;
+
+    if (m_paused && !viewer->m_paused) {
+        // Resuming: restart the clock from the next frame, so it does not carry
+        // the time spent paused as a delta.
+        m_lastTick = {};
+    }
+
     m_paused = viewer->m_paused;
     m_mirror = viewer->m_mirrorScene;
     m_itemSize = QSizeF(viewer->width(), viewer->height());
@@ -403,33 +439,11 @@ void LweSceneRenderer::restart() {
     }
 
     // userProperties arrives as a JSON object of property name -> value
-    const QByteArray rawProps = m_props.toUtf8();
-    if (!rawProps.isEmpty()) {
-        QJsonParseError error {};
-        const QJsonDocument document = QJsonDocument::fromJson(rawProps, &error);
-        if (error.error == QJsonParseError::NoError && document.isObject()) {
-            const QJsonObject object = document.object();
-            for (auto it = object.begin(); it != object.end(); ++it) {
-                QString value;
-                switch (it.value().type()) {
-                    case QJsonValue::Bool:
-                        value = it.value().toBool() ? QStringLiteral("true") : QStringLiteral("false");
-                        break;
-                    case QJsonValue::Double:
-                        value = QString::number(it.value().toDouble());
-                        break;
-                    case QJsonValue::String:
-                        value = it.value().toString();
-                        break;
-                    default:
-                        value = QString::fromUtf8(
-                            QJsonDocument(it.value().toObject()).toJson(QJsonDocument::Compact)
-                        );
-                        break;
-                }
-                wp_config_set_property(m_config, it.key().toUtf8().constData(), value.toUtf8().constData());
-            }
-        }
+    const QJsonObject properties = parseUserProperties(m_props);
+    for (auto it = properties.begin(); it != properties.end(); ++it) {
+        const QByteArray name = it.key().toUtf8();
+        const QByteArray value = userPropertyValueToString(it.value()).toUtf8();
+        wp_config_set_property(m_config, name.constData(), value.constData());
     }
 
     // Scene audio is not routed by this component.
@@ -501,6 +515,33 @@ void LweSceneRenderer::teardown() {
     m_loadedFolder.clear();
     m_loadedAssets.clear();
     m_loadedProperties.clear();
+}
+
+bool LweSceneRenderer::applyUserProperties() {
+    const QJsonObject properties = parseUserProperties(m_props);
+
+    if (properties.isEmpty()) {
+        // Properties cannot be unset on a running project, and a reload is what
+        // resets them to their default values.
+        return parseUserProperties(m_loadedProperties).isEmpty();
+    }
+
+    for (auto it = properties.begin(); it != properties.end(); ++it) {
+        const QByteArray name = it.key().toUtf8();
+        const QByteArray value = userPropertyValueToString(it.value()).toUtf8();
+
+        if (!wp_project_property_set_value_by_name(m_project, name.constData(), value.constData())) {
+            // The engine does not know this property, and reloading the project
+            // would not change that, so carry on with the other values.
+            _LWE_DEBUG() << "scene property is unknown to the engine:" << it.key();
+            continue;
+        }
+
+        // Keep the configuration in sync so a later reload keeps the value too.
+        wp_config_set_property(m_config, name.constData(), value.constData());
+    }
+
+    return true;
 }
 
 void LweSceneRenderer::blitTo(int targetFbo, const QSize& targetSize) {
@@ -578,9 +619,30 @@ void LweSceneRenderer::render() {
 
     ensureBlitProgram();
 
+    // Optional frame timing diagnostic: with WEKDE_LWE_TIMING=1 in the
+    // environment every 30th frame logs its full cost (engine render, mpv video
+    // textures and the blit, GPU work included). Used to check how much of the
+    // compositor's frame budget a wallpaper actually takes.
+    static const bool timingEnabled = qEnvironmentVariableIsSet("WEKDE_LWE_TIMING");
+    QElapsedTimer frameClock;
+
+    if (timingEnabled) {
+        frameClock.start();
+    }
+
     if (m_project == nullptr || m_folder != m_loadedFolder || m_assets != m_loadedAssets
         || m_props != m_loadedProperties) {
-        restart();
+        // The engine reads scene properties from the project on every frame, so
+        // changed values can be applied in place. Everything else (another
+        // wallpaper, another assets directory) needs a full reload.
+        const bool propertiesOnly = m_project != nullptr && m_folder == m_loadedFolder
+            && m_assets == m_loadedAssets && m_props != m_loadedProperties;
+
+        if (propertiesOnly && applyUserProperties()) {
+            m_loadedProperties = m_props;
+        } else {
+            restart();
+        }
     }
     if (m_project == nullptr) {
         return;
@@ -598,6 +660,14 @@ void LweSceneRenderer::render() {
     // Never let a stall (window hidden, suspended, ...) jump the animation.
     delta = std::clamp(delta, 0.0, 0.25);
     m_clock += delta * m_speed;
+
+    // Scene videos are decoded by mpv in real time, so the playback speed has to
+    // be forwarded to it for them to follow the speed setting. The engine's own
+    // clock (above) only drives shader animations and particles.
+    wp_config_set_playback_rate(m_config, m_speed);
+    // Pausing the wallpaper has to reach mpv as well, or the video keeps
+    // decoding while paused and jumps forward by the paused time on resume.
+    wp_config_set_playback_paused(m_config, m_paused);
 
     wp_render_update_time(m_context);
     wp_render_frame(m_project);
@@ -643,6 +713,31 @@ void LweSceneRenderer::render() {
                 },
                 Qt::QueuedConnection
             );
+        }
+    }
+
+    if (timingEnabled) {
+        m_gl->glFinish();
+        static QElapsedTimer sampleWindow;
+        static double total = 0.0;
+        static double worst = 0.0;
+        static int frames = 0;
+
+        if (!sampleWindow.isValid()) {
+            sampleWindow.start();
+        }
+
+        const double ms = frameClock.nsecsElapsed() / 1e6;
+        total += ms;
+        worst = std::max(worst, ms);
+        ++frames;
+        if (frames >= 30) {
+            _LWE_DEBUG() << "frame cost: avg" << (total / frames) << "ms, worst" << worst << "ms,"
+                         << (1000.0 * frames / sampleWindow.elapsed()) << "render/s";
+            total = 0.0;
+            worst = 0.0;
+            frames = 0;
+            sampleWindow.restart();
         }
     }
 

@@ -34,11 +34,24 @@ out of the build entirely. Scene audio is disabled at configuration time.
 ## Local patches
 
 The submodule is never modified in our git history. The patch files are applied
-to its working tree at build time with `git apply` (idempotent: an
-already-applied patch is detected with `git apply --reverse --check`), both at
-configure time and from the `ExternalProject` `PATCH_COMMAND`. The submodule
-therefore always reports the patched files as locally modified — that is
-expected.
+to its working tree at build time (both at configure time and from the
+`ExternalProject` `PATCH_COMMAND`); the submodule therefore always reports the
+patched files as locally modified, which is expected.
+
+The series is bundled into one patch file (`lwe-patch-series.patch` in the build
+directory) before `git apply` sees it, and always checked as a whole:
+
+- the bundle applies  -> it is not applied yet, apply it;
+- the bundle reverses -> it is already applied, do nothing;
+- neither             -> the tree is in an unexpected state (a partially applied
+  series, a patch that was added while the tree still had the previous ones, or
+  hand edits). The working tree is then reset to the pinned commit and the series
+  is applied from scratch, logging whatever was there.
+
+A per-patch "already applied" check (`git apply --reverse --check` on one patch)
+stops working as soon as two patches touch nearby lines: a later patch rewrites
+the context the earlier one needs to be recognised, and git only chains hunks
+*within* one patch file, not across files.
 
 | patch | why |
 | --- | --- |
@@ -46,8 +59,25 @@ expected.
 | `0002-scripted-shader-constants` | shader constants declared with `script` (e.g. driven by `engine.timeOfDay`) were never queued with the script engine, so their JSON `value` was used forever. Scene `2843295581` blended four videos with three time-of-day multiply constants and rendered as a flat clear-colour fill |
 | `0003-initialize-configuration-flags` | `Configuration::{baseOnly,noSolidFinal,passLog}` were uninitialised, so effects were randomly skipped and final passes randomly re-routed |
 | `0004-memory-footprint` | scene video textures were held twice in RAM (the header kept the copy `MemoryStreamProtocol` had already copied), mpv applied its demuxer cache (150 + 50 MiB by default) to a stream that is already in RAM, and it created an audio output for a texture that is always muted. Scene `2843295581` went from 1.31 GB to 0.77 GB RSS |
+| `0005-video-playback-rate` | with `0001` the videos play in real time, so the plugin's speed setting never reached them (the engine's own clock only drives shader animations and particles). `Configuration::playbackRate` is forwarded to mpv's `speed` property, like the plugin's own video backend does |
+| `0006-video-pause` | pausing the wallpaper only stopped the engine clock and the render timer, so scene videos kept decoding in the background and their position kept advancing; a resumed wallpaper showed the video jumping forward by however long it had been paused. `Configuration::playbackPaused` is forwarded to mpv's `pause` property, combined with each player's own pause flag (video wallpapers pause themselves) |
 
-Revert them with `git -C third_party/linux-wallpaperengine checkout .`.
+Revert them with `git -C third_party/linux-wallpaperengine checkout .`; the next
+build re-applies the series.
+
+## Frame timing diagnostic
+
+Setting `WEKDE_LWE_TIMING=1` in the environment makes every 30th rendered frame
+log its full cost (engine render, video textures and blit, GPU included):
+
+```
+WEKDE_LWE_TIMING=1 plasmashell
+# wekde.lwe: frame cost: avg 3.98 ms, worst 8.36 ms, 30.2 render/s
+```
+
+Measured on a Quadro P620 with scene `2843295581` (2560x1440, one 2560x1440@60fps
+video texture): ~3-4 ms per frame regardless of the configured FPS.
+
 
 ## Build and install
 
@@ -68,6 +98,10 @@ resolves the engine library from the system and not from the build tree.
   does no usage counting), so scenes that blend such videos can sample an empty
   texture — this hits the daytime blend of scene `2843295581`.
 - `engine.timeOfDay` is always `0`: lwe never writes `Context::daytime`.
-- Scene video playback has a slow, bounded CPU-side growth (a few MB per minute)
-  that is not fully attributed yet; it is unrelated to the Qt adapter layer
-  (a scene without video textures is completely flat).
+- Scene video playback grows plasmashell's RSS by a few MB per minute
+  (`2843295581`: ~4.6 MB/min at 30 fps, ~3.6 MB/min at 1 fps). Heaptrack shows
+  ~90% of the leaked bytes coming from `libcuda.so.1` and `libnvidia-glcore`
+  with lwe and the adapter only as intermediate stack frames, the growth scales
+  with the frame rate, and the per-process VRAM stays flat: it is the NVIDIA
+  driver's own CPU-side bookkeeping, not the plugin, lwe or Qt. The only knob is
+  the wallpaper's `Fps` setting.
