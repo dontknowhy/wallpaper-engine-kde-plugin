@@ -59,6 +59,19 @@ include(ExternalProject)
 #       caching a stream that is already in RAM) plus an audio output for a
 #       texture that is always muted. Scene 2843295581 (4 x 2560x1440@60fps
 #       videos, 348MB of .tex data) went from 1.31GB to 0.77GB RSS. See plan 6.10.
+# 0005: scene video textures are decoded by mpv in real time (0001), so the
+#       plugin's playback speed never reached them: the engine's own clock only
+#       drives shader animations and particles. mpv's `speed` property is now
+#       driven from a Configuration::playbackRate that the adapter keeps in sync
+#       with the QML speed setting, which is what the plugin's video backend
+#       does (Mpv.qml sets `speed` on its player). See plan 6.11.
+# 0006: pausing the wallpaper only stopped the engine's own clock and its render
+#       timer, so scene videos kept decoding in the background (power) and their
+#       position kept advancing by wall clock time, which made a resumed video
+#       jump forward by however long it had been paused. mpv's `pause` property is
+#       now driven from a Configuration::playbackPaused that the adapter keeps in
+#       sync with the paused state (combined with each player's own pause flag,
+#       which video wallpapers set themselves). See plan 6.11.
 #
 # Applied twice on purpose:
 #  * at configure time, so a pinned checkout that was reset (git submodule
@@ -66,7 +79,7 @@ include(ExternalProject)
 #    build. The touched files are declared as configure dependencies so that a
 #    reset actually triggers a reconfigure;
 #  * as ExternalProject's PATCH_COMMAND for a fresh build directory.
-# The applier is idempotent, so whichever runs second is a no-op.
+# The applier checks the series as a whole, so whichever runs second is a no-op.
 # ---------------------------------------------------------------------------
 set(LWE_PATCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/patches)
 set(LWE_PATCHES
@@ -74,23 +87,24 @@ set(LWE_PATCHES
     0002-scripted-shader-constants.patch
     0003-initialize-configuration-flags.patch
     0004-memory-footprint.patch
+    0005-video-playback-rate.patch
+    0006-video-pause.patch
 )
-set(LWE_PATCH_COMMAND "")
+# The whole series is passed to the applier as one ":"-joined argument (an actual
+# CMake list would turn into several arguments and lose its meaning) and is
+# bundled into a single patch file, see apply-patch.cmake.
+set(LWE_PATCH_BUNDLE ${CMAKE_BINARY_DIR}/lwe-patch-series.patch)
+set(LWE_PATCH_SERIES "")
 foreach(patch IN LISTS LWE_PATCHES)
     set(LWE_PATCH_FILE ${LWE_PATCH_DIR}/${patch})
     if(NOT EXISTS ${LWE_PATCH_FILE})
         message(FATAL_ERROR "missing lwe patch file: ${LWE_PATCH_FILE}")
     endif()
 
-    execute_process(
-        COMMAND ${CMAKE_COMMAND}
-            -DPATCH_FILE=${LWE_PATCH_FILE}
-            -DLWE_SRC=${LWE_SRC}
-            -P ${LWE_PATCH_DIR}/apply-patch.cmake
-        RESULT_VARIABLE LWE_PATCH_RESULT
-    )
-    if(NOT LWE_PATCH_RESULT EQUAL 0)
-        message(FATAL_ERROR "failed to apply lwe patch: ${patch}")
+    if(LWE_PATCH_SERIES STREQUAL "")
+        set(LWE_PATCH_SERIES ${patch})
+    else()
+        set(LWE_PATCH_SERIES "${LWE_PATCH_SERIES}:${patch}")
     endif()
 
     # Every file the patch touches becomes a configure dependency, so resetting
@@ -103,14 +117,29 @@ foreach(patch IN LISTS LWE_PATCHES)
             list(APPEND LWE_PATCHED_FILES ${LWE_SRC}/${target})
         endif()
     endforeach()
-
-    list(APPEND LWE_PATCH_COMMAND
-        COMMAND ${CMAKE_COMMAND}
-            -DPATCH_FILE=${LWE_PATCH_FILE}
-            -DLWE_SRC=${LWE_SRC}
-            -P ${LWE_PATCH_DIR}/apply-patch.cmake
-    )
 endforeach()
+
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+        -DLWE_SRC=${LWE_SRC}
+        -DPATCH_DIR=${LWE_PATCH_DIR}
+        -DPATCHES=${LWE_PATCH_SERIES}
+        -DPATCH_BUNDLE=${LWE_PATCH_BUNDLE}
+        -P ${LWE_PATCH_DIR}/apply-patch.cmake
+    RESULT_VARIABLE LWE_PATCH_RESULT
+)
+if(NOT LWE_PATCH_RESULT EQUAL 0)
+    message(FATAL_ERROR "failed to apply the lwe patch series")
+endif()
+
+set(LWE_PATCH_COMMAND
+    COMMAND ${CMAKE_COMMAND}
+        -DLWE_SRC=${LWE_SRC}
+        -DPATCH_DIR=${LWE_PATCH_DIR}
+        -DPATCHES=${LWE_PATCH_SERIES}
+        -DPATCH_BUNDLE=${LWE_PATCH_BUNDLE}
+        -P ${LWE_PATCH_DIR}/apply-patch.cmake
+)
 
 ExternalProject_Add(linux-wallpaperengine-core-ep
     SOURCE_DIR      ${LWE_SRC}

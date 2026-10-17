@@ -1,0 +1,93 @@
+diff --git a/include/linux-wallpaperengine/configuration.h b/include/linux-wallpaperengine/configuration.h
+index 698bf3d..fed8fec 100644
+--- a/include/linux-wallpaperengine/configuration.h
++++ b/include/linux-wallpaperengine/configuration.h
+@@ -125,6 +125,17 @@ WPENGINE_API void wp_config_set_audio_volume (wp_configuration* config, int volu
+  */
+ WPENGINE_API void wp_config_set_playback_rate (wp_configuration* config, double rate);
+ 
++/**
++ * Pauses/resumes the playback of video textures
++ *
++ * This is applied to the video players as they render, so it can be changed
++ * while a background is already playing
++ *
++ * @param config
++ * @param paused
++ */
++WPENGINE_API void wp_config_set_playback_paused (wp_configuration* config, bool paused);
++
+ /**
+  * Enables/disables particle rendering for backgrounds under this configuration
+  *
+diff --git a/src/core/WallpaperEngine/Configuration.h b/src/core/WallpaperEngine/Configuration.h
+index 451f07f..d315e1c 100644
+--- a/src/core/WallpaperEngine/Configuration.h
++++ b/src/core/WallpaperEngine/Configuration.h
+@@ -56,6 +56,11 @@ public:
+      * does for the plugin's own video backend
+      */
+     double playbackRate = 1.0;
++    /**
++     * NOTE (wallpaper-engine-kde-plugin local patch): whether video textures should be paused,
++     * so pausing the wallpaper also stops mpv from decoding (and from advancing its position)
++     */
++    bool playbackPaused = false;
+ 
+     bool baseOnly;
+     bool noSolidFinal;
+diff --git a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index 8331f3d..bf10f62 100644
+--- a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -141,6 +141,17 @@ void GLPlayer::render () const {
+ 	this->m_appliedPlaybackRate = playbackRate;
+     }
+ 
++    // NOTE (wallpaper-engine-kde-plugin local patch): pausing the wallpaper has to reach mpv too,
++    // otherwise the video keeps decoding in the background and its position jumps forward by the
++    // time spent paused. This is combined with the player's own pause state (video wallpapers
++    // pause themselves), so either of them keeps mpv paused.
++    const bool paused = this->m_paused || this->getContext ().getContext ().config.playbackPaused;
++
++    if (paused != this->m_appliedPaused) {
++	mpv_set_property_string (this->m_handle, "pause", paused ? "yes" : "no");
++	this->m_appliedPaused = paused;
++    }
++
+     // read all the events available
+     while (true) {
+ 	const mpv_event* event = mpv_wait_event (this->m_handle, 0);
+diff --git a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+index cd2d398..207d242 100644
+--- a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
++++ b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+@@ -78,6 +78,11 @@ protected:
+      * only update mpv's own `speed` property when the configuration changes it
+      */
+     mutable double m_appliedPlaybackRate = 0.0;
++    /**
++     * NOTE (wallpaper-engine-kde-plugin local patch): last play/pause state handed to mpv, used
++     * to only update mpv's own `pause` property when it actually changes
++     */
++    mutable bool m_appliedPaused = false;
+     std::optional<std::filesystem::path> m_file;
+     std::optional<MemoryStreamProtocolUniquePtr> m_stream;
+     uint32_t m_usageCount = 0;
+diff --git a/src/core/frontends/configuration.cpp b/src/core/frontends/configuration.cpp
+index 084339e..8b741eb 100644
+--- a/src/core/frontends/configuration.cpp
++++ b/src/core/frontends/configuration.cpp
+@@ -81,6 +81,12 @@ WPENGINE_API void wp_config_set_playback_rate (wp_configuration* config, const d
+     WPENGINE_CONFIG_API_END ();
+ }
+ 
++WPENGINE_API void wp_config_set_playback_paused (wp_configuration* config, const bool paused) {
++    WPENGINE_CONFIG_API_BEGIN
++    static_cast<WallpaperEngine::Configuration*> (config)->playbackPaused = paused;
++    WPENGINE_CONFIG_API_END ();
++}
++
+ WPENGINE_API void wp_config_set_disable_particles (wp_configuration* config, const bool disable) {
+     WPENGINE_CONFIG_API_BEGIN
+     static_cast<WallpaperEngine::Configuration*> (config)->disableParticles = disable;

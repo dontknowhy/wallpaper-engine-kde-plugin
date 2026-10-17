@@ -1,0 +1,95 @@
+diff --git a/include/linux-wallpaperengine/configuration.h b/include/linux-wallpaperengine/configuration.h
+index f011be8..698bf3d 100644
+--- a/include/linux-wallpaperengine/configuration.h
++++ b/include/linux-wallpaperengine/configuration.h
+@@ -114,6 +114,17 @@ WPENGINE_API void wp_config_enable_audio (wp_configuration* config, bool enable)
+  */
+ WPENGINE_API void wp_config_set_audio_volume (wp_configuration* config, int volume);
+ 
++/**
++ * Sets the playback rate used by video textures (1.0 is normal speed)
++ *
++ * This is applied to the video players as they render, so it can be changed
++ * while a background is already playing
++ *
++ * @param config
++ * @param rate
++ */
++WPENGINE_API void wp_config_set_playback_rate (wp_configuration* config, double rate);
++
+ /**
+  * Enables/disables particle rendering for backgrounds under this configuration
+  *
+diff --git a/src/core/WallpaperEngine/Configuration.h b/src/core/WallpaperEngine/Configuration.h
+index 0bdd668..451f07f 100644
+--- a/src/core/WallpaperEngine/Configuration.h
++++ b/src/core/WallpaperEngine/Configuration.h
+@@ -50,6 +50,12 @@ public:
+     bool disableParticles;
+     bool disableParallax;
+     int web_fps;
++    /**
++     * NOTE (wallpaper-engine-kde-plugin local patch): playback rate applied to video textures,
++     * so the plugin's speed setting affects scene videos the same way mpv's `speed` property
++     * does for the plugin's own video backend
++     */
++    double playbackRate = 1.0;
+ 
+     bool baseOnly;
+     bool noSolidFinal;
+diff --git a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index fcb2631..8331f3d 100644
+--- a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -129,6 +129,18 @@ void GLPlayer::render () const {
+ 	return;
+     }
+ 
++    // NOTE (wallpaper-engine-kde-plugin local patch): video textures play in real time (mpv's
++    // untimed mode is disabled), so the plugin's playback speed has to be forwarded to mpv for
++    // them to follow it. Only touch mpv when the configured value actually changed.
++    const double playbackRate = this->getContext ().getContext ().config.playbackRate;
++
++    if (playbackRate != this->m_appliedPlaybackRate) {
++	double rate = playbackRate;
++
++	mpv_set_property (this->m_handle, "speed", MPV_FORMAT_DOUBLE, &rate);
++	this->m_appliedPlaybackRate = playbackRate;
++    }
++
+     // read all the events available
+     while (true) {
+ 	const mpv_event* event = mpv_wait_event (this->m_handle, 0);
+diff --git a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+index c7576a4..cd2d398 100644
+--- a/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
++++ b/src/core/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+@@ -73,6 +73,11 @@ protected:
+     bool m_muted = false;
+     bool m_untimed = false;
+     bool m_paused = false;
++    /**
++     * NOTE (wallpaper-engine-kde-plugin local patch): last playback rate handed to mpv, used to
++     * only update mpv's own `speed` property when the configuration changes it
++     */
++    mutable double m_appliedPlaybackRate = 0.0;
+     std::optional<std::filesystem::path> m_file;
+     std::optional<MemoryStreamProtocolUniquePtr> m_stream;
+     uint32_t m_usageCount = 0;
+diff --git a/src/core/frontends/configuration.cpp b/src/core/frontends/configuration.cpp
+index a0338b8..084339e 100644
+--- a/src/core/frontends/configuration.cpp
++++ b/src/core/frontends/configuration.cpp
+@@ -75,6 +75,12 @@ WPENGINE_API void wp_config_set_audio_volume (wp_configuration* config, const in
+     WPENGINE_CONFIG_API_END ();
+ }
+ 
++WPENGINE_API void wp_config_set_playback_rate (wp_configuration* config, const double rate) {
++    WPENGINE_CONFIG_API_BEGIN
++    static_cast<WallpaperEngine::Configuration*> (config)->playbackRate = rate;
++    WPENGINE_CONFIG_API_END ();
++}
++
+ WPENGINE_API void wp_config_set_disable_particles (wp_configuration* config, const bool disable) {
+     WPENGINE_CONFIG_API_BEGIN
+     static_cast<WallpaperEngine::Configuration*> (config)->disableParticles = disable;
