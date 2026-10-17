@@ -66,13 +66,20 @@ Rectangle {
         return def;
     }
 
-    // Update all derived properties when curOpt changes
+    // The settings below have to follow two sources at once: the per-wallpaper
+    // options (curOpt, Wallpapers tab) and the wallpaper's own config
+    // (wallpaper.configuration, Settings tab). Both are reachable from a plain
+    // binding, so onCurOptChanged re-arms a real binding with Qt.binding()
+    // instead of assigning a value: an assignment (or a Connections handler
+    // that assigns) replaces the binding with a snapshot, and afterwards a
+    // change made in the config dialog -- the shared "Playback Speed" for
+    // example -- only showed up after the wallpaper had been reloaded.
     onCurOptChanged: {
         console.log("main.qml onCurOptChanged, curOpt:", JSON.stringify(curOpt));
-        displayMode = get_opt_value('display_mode', wallpaper.configuration.DisplayMode);
-        mute = get_opt_value('mute_audio', wallpaper.configuration.MuteAudio);
-        volume = get_opt_value('volume', wallpaper.configuration.Volume);
-        speed = get_opt_value('speed', wallpaper.configuration.Speed);
+        displayMode = Qt.binding(function() { return get_opt_value('display_mode', wallpaper.configuration.DisplayMode); });
+        mute       = Qt.binding(function() { return get_opt_value('mute_audio', wallpaper.configuration.MuteAudio); });
+        volume     = Qt.binding(function() { return get_opt_value('volume', wallpaper.configuration.Volume); });
+        speed      = Qt.binding(function() { return get_opt_value('speed', wallpaper.configuration.Speed); });
         const userProps = curOpt['user_props'];
         userPropsJson = userProps ? JSON.stringify(userProps) : "";
         console.log("main.qml updated: displayMode=", displayMode, "speed=", speed, "userPropsJson=", userPropsJson);
@@ -81,26 +88,14 @@ Rectangle {
     property int    displayMode: get_opt_value('display_mode', wallpaper.configuration.DisplayMode)
     property bool   mute: get_opt_value('mute_audio', wallpaper.configuration.MuteAudio)
     property int    volume: get_opt_value('volume', wallpaper.configuration.Volume)
+    // Scene wallpapers can be sped up/down per wallpaper (WE's `speed` property,
+    // hot reloadable from the Wallpapers tab). Video wallpapers have no such
+    // property, so they always follow the shared "Playback Speed" and any
+    // per-wallpaper value set on them is ignored.
     property real   speed: get_opt_value('speed', wallpaper.configuration.Speed)
+    property real   videoSpeed: wallpaper.configuration.Speed
     // User properties for scene wallpapers (JSON string format)
     property string userPropsJson: ""
-
-    // Reactive bindings for configuration changes
-    Connections {
-        target: wallpaper.configuration
-        function onDisplayModeChanged() {
-            background.displayMode = background.get_opt_value('display_mode', wallpaper.configuration.DisplayMode);
-        }
-        function onMuteAudioChanged() {
-            background.mute = background.get_opt_value('mute_audio', wallpaper.configuration.MuteAudio);
-        }
-        function onVolumeChanged() {
-            background.volume = background.get_opt_value('volume', wallpaper.configuration.Volume);
-        }
-        function onSpeedChanged() {
-            background.speed = background.get_opt_value('speed', wallpaper.configuration.Speed);
-        }
-    }
 
     property int    perOptChanged: wallpaper.configuration.PerOptChanged
     onPerOptChangedChanged: {
